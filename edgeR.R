@@ -1,13 +1,10 @@
 ###############################################################################
-# Differential Gene Expression Analysis using edgeR
-# Input  : featureCounts gene_counts.txt
-# Output : DEG tables, plots, normalized counts
+# edgeR Differential Expression Analysis (ROBUST FEATURECOUNTS TSV INPUT)
 #
-# Experimental design example:
-#   4 samples total
-#   2 Control vs 2 Treated
-#
-# Author : Standard Academic RNA-seq Pipeline
+# Fixes:
+# - Does NOT assume counts start at column 7
+# - Automatically detects count columns
+# - Prevents "undefined columns selected" error
 ###############################################################################
 
 ############################
@@ -15,37 +12,61 @@
 ############################
 suppressMessages({
   library(edgeR)
+  library(data.table)
   library(ggplot2)
   library(pheatmap)
-  library(data.table)
 })
 
 ############################
-# STEP 1: Read featureCounts output
+# STEP 1: Read featureCounts TSV safely
 ############################
-# featureCounts output has:
-#  - Comment lines starting with #
-#  - GeneID in column 1
-#  - Counts start from column 7 onward
-
 counts_raw <- fread(
-  "counts/gene_counts.txt",
+  "counts/gene_counts.tsv",
+  sep = "\t",
+  header = TRUE,
   data.table = FALSE
 )
 
-# Remove annotation columns, keep only count matrix
-count_matrix <- as.matrix(counts_raw[, 7:ncol(counts_raw)])
+# Inspect structure (safe for debugging)
+cat("Columns in featureCounts file:\n")
+print(colnames(counts_raw))
+
+############################
+# STEP 2: Identify count columns automatically
+############################
+# featureCounts annotation columns usually include:
+# Geneid, Chr, Start, End, Strand, Length
+# Count columns = everything AFTER these
+
+annotation_cols <- c("Geneid", "Chr", "Start", "End", "Strand", "Length")
+
+missing_cols <- setdiff(annotation_cols, colnames(counts_raw))
+if (length(missing_cols) > 0) {
+  stop("Missing expected annotation columns: ",
+       paste(missing_cols, collapse = ", "))
+}
+
+count_col_start <- which(colnames(counts_raw) == "Length") + 1
+count_cols <- count_col_start:ncol(counts_raw)
+
+############################
+# STEP 3: Build count matrix
+############################
+count_matrix <- as.matrix(counts_raw[, count_cols])
 rownames(count_matrix) <- counts_raw$Geneid
 
-# Check dimensions
+# Sanity checks
+stopifnot(is.matrix(count_matrix))
+stopifnot(nrow(count_matrix) > 0)
+stopifnot(ncol(count_matrix) > 0)
+
 cat("Genes:", nrow(count_matrix), "\n")
 cat("Samples:", ncol(count_matrix), "\n")
 
 ############################
-# STEP 2: Define sample metadata
+# STEP 4: Define sample metadata
 ############################
-# IMPORTANT: Order must match columns in count_matrix
-
+# MODIFY THIS to match your experiment
 sample_info <- data.frame(
   sample = colnames(count_matrix),
   condition = factor(c(
@@ -54,106 +75,93 @@ sample_info <- data.frame(
   ))
 )
 
-print(sample_info)
+stopifnot(nrow(sample_info) == ncol(count_matrix))
 
 ############################
-# STEP 3: Create edgeR DGEList object
+# STEP 5: Create DGEList object
 ############################
 dge <- DGEList(
   counts = count_matrix,
-  group  = sample_info$condition
+  group = sample_info$condition
 )
 
 ############################
-# STEP 4: Filter lowly expressed genes
+# STEP 6: Filter low-expression genes
 ############################
-# edgeR recommendation:
-# Keep genes expressed in enough samples
-
-keep_genes <- filterByExpr(dge)
-dge <- dge[keep_genes, , keep.lib.sizes = FALSE]
+keep <- filterByExpr(dge)
+dge <- dge[keep, , keep.lib.sizes = FALSE]
 
 cat("Genes after filtering:", nrow(dge), "\n")
 
 ############################
-# STEP 5: Library size normalization
+# STEP 7: Normalize (TMM)
 ############################
-# Uses TMM (Trimmed Mean of M-values)
-
 dge <- calcNormFactors(dge)
 
-# View normalization factors
-dge$samples
-
 ############################
-# STEP 6: Experimental design matrix
+# STEP 8: Design matrix
 ############################
 design <- model.matrix(~ condition, data = sample_info)
-colnames(design)
 
 ############################
-# STEP 7: Estimate dispersion
+# STEP 9: Estimate dispersion
 ############################
-# Biological variability estimation
-# Required before differential testing
-
 dge <- estimateDisp(dge, design)
-
-# Visualize dispersion
 plotBCV(dge)
 
 ############################
-# STEP 8: Fit GLM model
+# STEP 10: Fit GLM (QL framework)
 ############################
 fit <- glmQLFit(dge, design)
 
 ############################
-# STEP 9: Differential expression testing
+# STEP 11: Differential testing
 ############################
-# Coefficient 2 = conditionTreated vs Control
-
 qlf <- glmQLFTest(fit, coef = 2)
 
-# Extract results table
 deg_table <- topTags(qlf, n = Inf)$table
-
-# Add FDR explicitly (already included, but clarity matters)
 deg_table$FDR <- p.adjust(deg_table$PValue, method = "BH")
 
 ############################
-# STEP 10: Save DEG results
+# STEP 12: Save results
 ############################
-write.csv(
+dir.create("results", showWarnings = FALSE)
+
+write.table(
   deg_table,
-  file = "results/edgeR_DEG_full_results.csv",
-  row.names = TRUE
+  file = "results/edgeR_all_DEGs.tsv",
+  sep = "\t",
+  quote = FALSE,
+  col.names = NA
 )
 
 ############################
-# STEP 11: Define significant DEGs
+# STEP 13: Significant DEGs
 ############################
 sig_deg <- deg_table[
   abs(deg_table$logFC) >= 1 &
   deg_table$FDR < 0.05,
 ]
 
-cat("Significant DEGs:", nrow(sig_deg), "\n")
-
-write.csv(
+write.table(
   sig_deg,
-  file = "results/edgeR_significant_DEGs.csv",
-  row.names = TRUE
+  file = "results/edgeR_significant_DEGs.tsv",
+  sep = "\t",
+  quote = FALSE,
+  col.names = NA
 )
 
+cat("Significant DEGs:", nrow(sig_deg), "\n")
+
 ############################
-# STEP 12: Volcano plot
+# STEP 14: Volcano plot
 ############################
-volcano_data <- data.frame(
+volcano_df <- data.frame(
   logFC = deg_table$logFC,
   negLogFDR = -log10(deg_table$FDR)
 )
 
-ggplot(volcano_data, aes(logFC, negLogFDR)) +
+ggplot(volcano_df, aes(logFC, negLogFDR)) +
   geom_point(alpha = 0.6) +
   geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
   geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
@@ -165,34 +173,29 @@ ggplot(volcano_data, aes(logFC, negLogFDR)) +
   )
 
 ############################
-# STEP 13: MDS plot (sample similarity)
+# STEP 15: Heatmap of top DEGs
 ############################
-plotMDS(dge,
-        labels = sample_info$condition,
-        col = c("blue", "blue", "red", "red"))
+if (nrow(sig_deg) >= 2) {
+  top_genes <- rownames(sig_deg)[1:min(50, nrow(sig_deg))]
+  logCPM <- cpm(dge, log = TRUE)
+
+  pheatmap(
+    logCPM[top_genes, ],
+    scale = "row",
+    annotation_col = sample_info["condition"],
+    main = "Top Differentially Expressed Genes"
+  )
+}
 
 ############################
-# STEP 14: Heatmap of top DEGs
+# STEP 16: MDS plot
 ############################
-top_genes <- rownames(sig_deg)[1:min(50, nrow(sig_deg))]
-
-logCPM <- cpm(dge, log = TRUE)
-
-pheatmap(
-  logCPM[top_genes, ],
-  scale = "row",
-  annotation_col = sample_info["condition"],
-  show_rownames = TRUE,
-  fontsize_row = 8,
-  main = "Top Differentially Expressed Genes"
+plotMDS(
+  dge,
+  labels = sample_info$condition,
+  col = as.numeric(sample_info$condition)
 )
 
-############################
-# STEP 15: MA plot
-############################
-plotMD(qlf)
-abline(h = c(-1, 1), col = "blue")
-
 ###############################################################################
-# END OF edgeR PIPELINE
+# END OF SCRIPT
 ###############################################################################
