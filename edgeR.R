@@ -1,10 +1,7 @@
 ###############################################################################
-# edgeR Differential Expression Analysis (ROBUST FEATURECOUNTS TSV INPUT)
-#
-# Fixes:
-# - Does NOT assume counts start at column 7
-# - Automatically detects count columns
-# - Prevents "undefined columns selected" error
+# edgeR Differential Expression Analysis
+# Robust to ALL featureCounts TSV formats
+# NO column position assumptions
 ###############################################################################
 
 ############################
@@ -18,7 +15,7 @@ suppressMessages({
 })
 
 ############################
-# STEP 1: Read featureCounts TSV safely
+# STEP 1: Read featureCounts TSV
 ############################
 counts_raw <- fread(
   "counts/gene_counts.tsv",
@@ -27,35 +24,28 @@ counts_raw <- fread(
   data.table = FALSE
 )
 
-# Inspect structure (safe for debugging)
-cat("Columns in featureCounts file:\n")
+cat("Detected columns:\n")
 print(colnames(counts_raw))
 
 ############################
-# STEP 2: Identify count columns automatically
+# STEP 2: Automatically detect count columns
 ############################
-# featureCounts annotation columns usually include:
-# Geneid, Chr, Start, End, Strand, Length
-# Count columns = everything AFTER these
+# Rule:
+# - Count columns are numeric
+# - Annotation columns are character / factor
 
-annotation_cols <- c("Geneid", "Chr", "Start", "End", "Strand", "Length")
+is_numeric <- sapply(counts_raw, is.numeric)
 
-missing_cols <- setdiff(annotation_cols, colnames(counts_raw))
-if (length(missing_cols) > 0) {
-  stop("Missing expected annotation columns: ",
-       paste(missing_cols, collapse = ", "))
+if (sum(is_numeric) == 0) {
+  stop("No numeric columns detected. This is not a valid featureCounts file.")
 }
 
-count_col_start <- which(colnames(counts_raw) == "Length") + 1
-count_cols <- count_col_start:ncol(counts_raw)
+count_matrix <- as.matrix(counts_raw[, is_numeric])
+rownames(count_matrix) <- counts_raw[[1]]   # GeneID always first column
 
 ############################
-# STEP 3: Build count matrix
+# STEP 3: Sanity checks
 ############################
-count_matrix <- as.matrix(counts_raw[, count_cols])
-rownames(count_matrix) <- counts_raw$Geneid
-
-# Sanity checks
 stopifnot(is.matrix(count_matrix))
 stopifnot(nrow(count_matrix) > 0)
 stopifnot(ncol(count_matrix) > 0)
@@ -64,9 +54,9 @@ cat("Genes:", nrow(count_matrix), "\n")
 cat("Samples:", ncol(count_matrix), "\n")
 
 ############################
-# STEP 4: Define sample metadata
+# STEP 4: Sample metadata
 ############################
-# MODIFY THIS to match your experiment
+# IMPORTANT: must match number of samples
 sample_info <- data.frame(
   sample = colnames(count_matrix),
   condition = factor(c(
@@ -75,10 +65,12 @@ sample_info <- data.frame(
   ))
 )
 
-stopifnot(nrow(sample_info) == ncol(count_matrix))
+if (nrow(sample_info) != ncol(count_matrix)) {
+  stop("Sample metadata does not match number of samples.")
+}
 
 ############################
-# STEP 5: Create DGEList object
+# STEP 5: Create DGEList
 ############################
 dge <- DGEList(
   counts = count_matrix,
@@ -110,7 +102,7 @@ dge <- estimateDisp(dge, design)
 plotBCV(dge)
 
 ############################
-# STEP 10: Fit GLM (QL framework)
+# STEP 10: Fit GLM (QL)
 ############################
 fit <- glmQLFit(dge, design)
 
@@ -123,7 +115,7 @@ deg_table <- topTags(qlf, n = Inf)$table
 deg_table$FDR <- p.adjust(deg_table$PValue, method = "BH")
 
 ############################
-# STEP 12: Save results
+# STEP 12: Save all results
 ############################
 dir.create("results", showWarnings = FALSE)
 
@@ -140,7 +132,7 @@ write.table(
 ############################
 sig_deg <- deg_table[
   abs(deg_table$logFC) >= 1 &
-  deg_table$FDR < 0.05,
+    deg_table$FDR < 0.05,
 ]
 
 write.table(
@@ -173,12 +165,12 @@ ggplot(volcano_df, aes(logFC, negLogFDR)) +
   )
 
 ############################
-# STEP 15: Heatmap of top DEGs
+# STEP 15: Heatmap
 ############################
 if (nrow(sig_deg) >= 2) {
   top_genes <- rownames(sig_deg)[1:min(50, nrow(sig_deg))]
   logCPM <- cpm(dge, log = TRUE)
-
+  
   pheatmap(
     logCPM[top_genes, ],
     scale = "row",
