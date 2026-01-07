@@ -1,0 +1,118 @@
+#SET YOUR PATHS HERE (CHANGE ONLY THESE TWO LINES)
+
+>counts_dir <- "ADD_FULL_PATH_TO_COUNTS_FOLDER_HERE"
+>results_dir <- "ADD_FULL_PATH_TO_RESULTS_FOLDER_HERE"
+
+# Example:
+# counts_dir <- "/home/user/project/counts"
+# results_dir <- "/home/user/project/results"
+
+# 1. Load required libraries
+
+>if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+	
+	BiocManager::install("DESeq2")
+	BiocManager::install("ggplot2")
+	BiocManager::install("pheatmap")
+
+>library(DESeq2)
+>library(ggplot2)
+>library(pheatmap)
+
+# 2. Set working directory
+>setwd(counts_dir)  #Your Working Dir
+
+# 3. Read gene_counts.txt
+
+>countData <- read.table("gene_counts.txt",
+                        header = TRUE,
+                        row.names = 1,
+                        sep = "\t",
+                        check.names = FALSE)
+						
+# 4. Remove annotation columns (Chr, Start, End, Strand, Length)  #Keep only numeric sample columns
+
+>countData <- countData[, 6:ncol(countData)]
+
+# 5. Rename sample columns
+
+>colnames(countData) <- c("Control1", "Control2", "Test1", "Test2")
+
+# 6. Create sample metadata
+
+>colData <- data.frame(
+  condition = factor(c("Control", "Control", "Test", "Test")),
+  row.names = colnames(countData)
+)
+
+# 7. Create DESeq2 dataset
+
+>dds <- DESeqDataSetFromMatrix(
+  countData = countData,
+  colData = colData,
+  design = ~ condition
+)
+
+# 8. Filter low-count genes
+
+>dds <- dds[rowSums(counts(dds)) >= 10, ]   #Remove genes with total counts < 10.
+
+# 9. Run DESeq2
+
+>dds <- DESeq(dds)
+
+# 10. Extract DE Results (Test vs Control)  #Get results and Save
+
+>res <- results(dds, contrast = c("condition", "Test", "Control"))
+>resOrdered <- res[order(res$padj), ]
+>write.csv(as.data.frame(resOrdered),
+          file = file.path(results_dir, "differential_expression_results.csv"))  #file.path(#your path)
+
+>sig_genes <- subset(resOrdered, padj < 0.05 & abs(log2FoldChange) > 1)          #file.path(#your path)
+>write.csv(as.data.frame(sig_genes),
+          file = file.path(results_dir, "significant_genes.csv"))                #file.path(#your path)
+
+>write.csv(counts(dds, normalized = TRUE),
+          file = file.path(results_dir, "normalized_counts.csv"))                #file.path(#your path)
+
+# 11. VSTVariance Stabilizing Transformation (VST)
+
+>vsd <- vst(dds, blind = FALSE)
+
+# 12. PCA plot
+
+>pcaData <- plotPCA(vsd, intgroup = "condition", returnData = TRUE)
+>percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+>pdf(file.path(results_dir, "PCA_plot.pdf"), width = 8, height = 6)
+ggplot(pcaData, aes(PC1, PC2, color = condition, label = name)) +
+  geom_point(size = 3) +
+  geom_text(vjust = 1.5) +
+  theme_bw()
+dev.off()
+
+# 13. Heatmap of top 50 DE genes
+
+>top_genes <- head(order(resOrdered$padj), 50)
+mat <- assay(vsd)[top_genes, ]
+mat <- mat - rowMeans(mat)
+
+>pdf(file.path(results_dir, "heatmap_top50.pdf"), width = 10, height = 12)
+pheatmap(mat, annotation_col = colData, cluster_rows = TRUE, cluster_cols = TRUE)
+dev.off()
+
+# 14. MA plot
+
+>pdf(file.path(results_dir, "MA_plot.pdf"), width = 8, height = 6)
+plotMA(res, ylim = c(-5, 5))
+dev.off()
+
+# 15. Dispersion plot
+
+>pdf(file.path(results_dir, "dispersion_plot.pdf"), width = 8, height = 6)
+plotDispEsts(dds)
+dev.off()
+
+print("DESeq2 analysis complete!")
+print(paste("Results saved in:", results_dir)) 
